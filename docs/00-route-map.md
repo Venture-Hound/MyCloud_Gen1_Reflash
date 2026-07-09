@@ -74,6 +74,8 @@ traveller.*
 
 11. [Lessons and dead-ends, ranked](11-lessons-and-dead-ends.md)
 
+12. And one last mistake: When you ask ClaudeCode to pull all this together into a GitHub repo, don't forget you are in /model Fable /effort xhigh. Because that would send a lot of tokens down the drain. Just sayin'. No particular reason. V.H.
+
 ---
 
 The [field-notes/](field-notes/) directory holds the contemporaneous
