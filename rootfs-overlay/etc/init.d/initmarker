@@ -1,0 +1,14 @@
+#!/bin/sh
+# EARLIEST boot breadcrumb (Attempt 6). Runs as the FIRST inittab sysinit
+# action, BEFORE /etc/init.d/rcS. Proves /sbin/init exec'd + parsed inittab.
+# Writes to the ROOT fs (mounted rw by the kernel cmdline) then sync; does NOT
+# depend on udev, sda4, or any rc script. Read back read-only with:
+#   debugfs -R "cat /INIT-RAN.txt" /dev/sdX1
+D=/INIT-RAN.txt
+{
+  echo "init-exec=yes"
+  echo "time=[$(date 2>/dev/null)]"
+  echo "uname=[$(uname -srm 2>/dev/null)]"
+} > "$D" 2>/dev/null
+sync
+exit 0

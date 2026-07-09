@@ -1,0 +1,10 @@
+#!/bin/sh
+# Populate /dev WITHOUT udev. Runs as an inittab 'sysinit' action BEFORE rcS
+# (modern udev v232 hangs on the frozen vendor 3.2.26 kernel). Mounts devtmpfs
+# so the kernel auto-creates every node (sd*, md*, ttyS0, USB hotplug). Idempotent.
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+mkdir -p /dev/pts /dev/shm 2>/dev/null
+{ echo "STAGE=devfs-sysinit t=[$(date 2>/dev/null)]"
+  echo "dev_nodes_after=[$(ls /dev 2>/dev/null | wc -l)]"; } >> /DEVFS-RAN.txt 2>/dev/null
+sync
+exit 0

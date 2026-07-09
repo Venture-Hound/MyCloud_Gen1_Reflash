@@ -1,0 +1,14 @@
+#!/bin/bash
+# Kick off a SMART long self-test if none started in the last 28 days.
+# Runs daily at 04:10 via cron-nas-maint; skipped days (box off) are
+# simply caught the next 4am the box is up. The test runs inside the
+# drive and does not interrupt service. Results: dashboard / Disk page;
+# a FAILED verdict turns the LED red via led-status.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+STAMP=/var/lib/nas-panel/last-smart-long
+mkdir -p /var/lib/nas-panel
+if [ -f "$STAMP" ]; then
+	age=$(( $(date +%s) - $(stat -c %Y "$STAMP") ))
+	[ "$age" -lt $((28*86400)) ] && exit 0
+fi
+smartctl -t long /dev/sda >/dev/null 2>&1 && touch "$STAMP"

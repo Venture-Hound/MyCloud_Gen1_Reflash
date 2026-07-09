@@ -1,0 +1,19 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          canary
+# Required-Start:    udev
+# Required-Stop:
+# Default-Start:     S
+# Default-Stop:
+# Short-Description: boot breadcrumb (root fs + data partition) diagnostic
+### END INIT INFO
+[ "$1" = start ] || exit 0
+# root-fs breadcrumb first (no dependency on sda4 / device nodes)
+printf 'STAGE=rcS-S03 t=[%s] u=[%s]\n' "$(date 2>/dev/null)" "$(uname -srm 2>/dev/null)" >> /CANARY-RAN.txt 2>/dev/null
+sync
+# then original data-partition canary (now /dev/sda4 exists via devtmpfs)
+D=/mnt/.canary; mkdir -p "$D" 2>/dev/null
+mount -t ext4 /dev/sda4 "$D" 2>/dev/null
+printf 'STAGE=rcS-reached time=[%s] uname=[%s]\n' "$(date 2>/dev/null)" "$(uname -a 2>/dev/null)" >> "$D/boot-canary.txt" 2>/dev/null
+sync; umount "$D" 2>/dev/null
+exit 0

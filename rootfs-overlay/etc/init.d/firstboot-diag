@@ -1,0 +1,38 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          firstboot-diag
+# Required-Start:    $all
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:
+# Short-Description: boot diagnostic dump + detached network self-test
+### END INIT INFO
+[ "$1" = start ] || exit 0
+TS=$(date +%Y%m%d-%H%M%S 2>/dev/null || echo unknown)
+for BASE in /srv/nas/first-boot-diag /var/log/first-boot-diag; do
+  mkdir -p "$BASE" 2>/dev/null || continue
+  OUT="$BASE/boot-$TS.txt"
+  { echo "==== $(date) ===="; echo "-- ip addr --"; ip addr; echo "-- ip link --"; ip link
+    echo "-- lsmod --"; lsmod; echo "-- dmesg pfe/eth --"; dmesg | grep -iE 'pfe|eth|comcerto|c2000|link|vwd'
+    echo "-- dmesg tail --"; dmesg | tail -n 80; echo "-- services --"; ps w | grep -iE 'smbd|sshd|avahi|chrony|getty' | grep -v grep
+    echo "-- mounts --"; mount; } > "$OUT" 2>&1
+  ln -sf "$OUT" "$BASE/latest.txt" 2>/dev/null
+done
+# detached (survives init exit) delayed network self-test
+setsid /bin/sh -c '
+  sleep 60
+  ND=/srv/nas/net-diag; mkdir -p "$ND" 2>/dev/null
+  T=$(date +%H%M%S 2>/dev/null || echo x)
+  { echo "==== net-diag $(date) ===="
+    echo "-- eth0 flags --"; ip link show eth0
+    echo "-- ip -s link eth0 (RX/TX/dropped/mcast) --"; ip -s link show eth0
+    echo "-- /proc/net/dev --"; cat /proc/net/dev
+    echo "-- ip neigh --"; ip neigh
+    echo "-- /proc/net/arp --"; cat /proc/net/arp
+    echo "-- listening --"; ss -tlnp 2>/dev/null
+    echo "-- ping gw .1 --"; ping -c3 -W2 192.168.0.1 2>&1
+    echo "-- ping laptop .2 --"; ping -c3 -W2 192.168.0.2 2>&1
+    echo "-- ip neigh AFTER --"; ip neigh
+  } > "$ND/netdiag-$T.txt" 2>&1
+  sync ' >/dev/null 2>&1 &
+exit 0

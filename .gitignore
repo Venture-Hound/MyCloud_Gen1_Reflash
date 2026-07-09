@@ -1,0 +1,18 @@
+# Build outputs — regenerate via build/, don't commit
+*.tar.gz
+*.img
+rootfs-stretch/
+rootfs-excalibur/
+*.orig-32k
+*.stub
+
+# Internal planning notes — contains pre-redaction credentials/names, do NOT publish
+REPO-PLAN.md
+
+# Build scratch + backup drive images
+.build-scratch/
+backups/
+
+# Local scratch
+*.swp
+.DS_Store

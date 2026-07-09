@@ -1,0 +1,3 @@
+# CLIO NAS maintenance (see /usr/local/lib/nas-panel/)
+10 4 * * * root /usr/local/lib/nas-panel/smart-monthly >/dev/null 2>&1
+30 4 * * * root /usr/local/lib/nas-panel/recycle-purge >/dev/null 2>&1

@@ -1,0 +1,13 @@
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet static
+    pre-up echo /sbin/fw-helper > /proc/sys/kernel/hotplug
+    pre-up modprobe pfe disable_wifi_offload=1 lro_mode=1 tx_qos=1 alloc_on_init=1
+    pre-up sleep 3
+    address 192.168.0.16
+    netmask 255.255.255.0
+    gateway 192.168.0.1
+    dns-nameservers 192.168.0.1 1.1.1.1
+    post-up sysctl -w net.ipv4.conf.eth0.arp_notify=1 2>/dev/null || true

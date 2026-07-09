@@ -1,0 +1,319 @@
+#!/bin/bash
+# panel-op — the single privileged entrypoint for the CLIO NAS web panel.
+# Called as: sudo /usr/local/lib/nas-panel/panel-op <verb> [args...]
+# The ONLY thing www-data may sudo. Trusts nothing: every argument is
+# re-validated here regardless of what the CGI layer checked.
+set -u
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export LC_ALL=C
+
+SMB=/etc/samba/smb.conf
+DISK=/dev/sda
+LED=/sys/class/leds/system_led
+NAME_RE='^[a-z][a-z0-9]{1,15}$'
+PROTECTED_USERS='root|alpha|daemon|bin|sys|www-data|nobody'
+PROTECTED_SHARES='global|public|admin|alpha|homes|printers|usb'
+USBMNT=/srv/nas/usb
+LEDSTATE=/var/run/nas-led.state
+
+die(){ echo "ERR: $*"; exit 1; }
+need_name(){ [[ "${1:-}" =~ $NAME_RE ]] || die "invalid name '${1:-}' (lowercase letters+digits, 2-16 chars)"; }
+reload_smb(){ service smbd reload >/dev/null 2>&1; }
+
+# Vendor LED driver kernel-oopses in led_brightness_store, and the
+# blink attribute is write-dead. COLOR-ONLY policy (see led-status):
+# write color on change; brightness only if not already 255; never
+# touch blink.
+led_set(){ # color (second arg ignored — interface compat)
+	local color=${1:-}
+	case "$color" in
+	blue|red|green|yellow|white) ;;
+	*) die "bad color '$color'" ;;
+	esac
+	[ "$(cat "$LEDSTATE" 2>/dev/null)" = "$color" ] && return 0
+	echo "$color" > "$LED/color" || die "LED driver rejected color $color"
+	if [ "$(cat "$LED/brightness" 2>/dev/null)" != "255" ]; then
+		sleep 0.3
+		echo 255 > "$LED/brightness"
+	fi
+	echo "$color" > "$LEDSTATE"
+}
+
+share_add_block(){ # name type [owner]
+	local n=$1 typ=$2 owner=${3:-} tmp
+	tmp=$(mktemp) || die mktemp
+	cat "$SMB" > "$tmp"
+	{
+	echo ""
+	echo "[$n]"
+	case "$typ" in
+	private) cat <<EOF
+   comment = $n private
+   path = /srv/nas/$n
+   browseable = yes
+   read only = no
+   guest ok = no
+   valid users = $owner @smbadmins
+   force group = users
+   create mask = 0664
+   directory mask = 2775
+EOF
+	;;
+	family) cat <<EOF
+   comment = $n (family)
+   path = /srv/nas/$n
+   browseable = yes
+   read only = no
+   guest ok = no
+   valid users = @users
+   force group = users
+   create mask = 0664
+   directory mask = 2775
+EOF
+	;;
+	guest) cat <<EOF
+   comment = $n (guest ok)
+   path = /srv/nas/$n
+   browseable = yes
+   read only = no
+   guest ok = yes
+   force group = users
+   create mask = 0664
+   directory mask = 2775
+EOF
+	;;
+	esac
+	# recycle bin on every share: deletes land in .recycle/<user>
+	cat <<'EOF'
+   vfs objects = recycle
+   recycle:repository = .recycle/%U
+   recycle:keeptree = yes
+   recycle:versions = yes
+   recycle:directory_mode = 0770
+   recycle:exclude = *.tmp,*.temp,~$*,*.TMP
+EOF
+	} >> "$tmp"
+	testparm -s "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; die "testparm rejected new share config"; }
+	cat "$tmp" > "$SMB"; rm -f "$tmp"; reload_smb
+}
+
+share_del_block(){ # name
+	local n=$1 tmp
+	grep -q "^\[$n\]" "$SMB" || return 1
+	tmp=$(mktemp) || die mktemp
+	awk -v tgt="[$n]" 'BEGIN{skip=0} /^\[/{skip=($0==tgt)} !skip' "$SMB" > "$tmp"
+	testparm -s "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; die "testparm rejected config after removal"; }
+	cat "$tmp" > "$SMB"; rm -f "$tmp"; reload_smb
+}
+
+verb=${1:-help}; shift || true
+case "$verb" in
+
+status)
+	echo "## uptime"; uptime
+	echo "## mem"; free -m | sed -n '2p'
+	echo "## df"; df -h / /srv/nas | sed 1d
+	echo "## md"; grep -A1 '^md' /proc/mdstat | head -2
+	echo "## services"
+	for s in smbd nmbd wsdd2 sshd chronyd cron rsyslogd lighttpd; do
+		if pidof "$s" >/dev/null 2>&1; then echo "$s up"; else echo "$s DOWN"; fi
+	done
+	echo "## smart"
+	out=$(smartctl -H -n standby "$DISK" 2>&1)
+	if echo "$out" | grep -q "STANDBY"; then echo "standby"
+	elif echo "$out" | grep -qi "PASSED"; then echo "PASSED"
+	elif echo "$out" | grep -qi "FAILED"; then echo "FAILED"
+	else echo "unknown"; fi
+	echo "## led"
+	echo "color=$(cat "$LED/color" 2>/dev/null) blink=$(cat "$LED/blink" 2>/dev/null) brightness=$(cat "$LED/brightness" 2>/dev/null)"
+	;;
+
+smart-full) exec smartctl -a "$DISK" ;;
+
+smart-test)
+	t=${1:-short}
+	case "$t" in short|long) ;; *) die "bad test type";; esac
+	exec smartctl -t "$t" "$DISK" ;;
+
+user-list)
+	admins=",$(getent group smbadmins | cut -d: -f4),"
+	pdbedit -L | cut -d: -f1 | while read -r u; do
+		if [ "$u" = alpha ] || [ "${admins/,$u,/}" != "$admins" ]; then
+			printf '%s\tadmin\n' "$u"
+		else
+			printf '%s\t-\n' "$u"
+		fi
+	done ;;
+
+user-add)
+	need_name "${1:-}"; u=$1; withshare=${2:-share}
+	IFS= read -r pass || pass=""
+	if [ -n "$pass" ] && [ ${#pass} -lt 4 ]; then
+		die "password too short (min 4 chars, or blank for none)"
+	fi
+	[[ "$u" =~ ^($PROTECTED_USERS)$ ]] && die "protected name"
+	id -u "$u" >/dev/null 2>&1 || adduser --disabled-password --gecos "" --quiet "$u" || die "adduser failed"
+	usermod -aG users "$u"
+	if [ -n "$pass" ]; then
+		printf '%s\n%s\n' "$pass" "$pass" | smbpasswd -a -s "$u" >/dev/null || die "smbpasswd failed"
+	else
+		printf 'Temp0Pass1\nTemp0Pass1\n' | smbpasswd -a -s "$u" >/dev/null || die "smbpasswd failed"
+		smbpasswd -n "$u" >/dev/null || die "smbpasswd -n failed"
+	fi
+	if [ "$withshare" = share ] && ! grep -q "^\[$u\]" "$SMB"; then
+		mkdir -p "/srv/nas/$u"
+		chown "$u:users" "/srv/nas/$u"; chmod 2770 "/srv/nas/$u"
+		share_add_block "$u" private "$u"
+	fi
+	if [ -n "$pass" ]; then echo "OK: user $u created"; else echo "OK: user $u created (no password)"; fi ;;
+
+user-pass)
+	need_name "${1:-}"; u=$1
+	IFS= read -r pass || pass=""
+	if [ -n "$pass" ] && [ ${#pass} -lt 4 ]; then
+		die "password too short (min 4 chars, or blank for none)"
+	fi
+	pdbedit -L | grep -q "^$u:" || die "no such SMB user"
+	if [ -n "$pass" ]; then
+		printf '%s\n%s\n' "$pass" "$pass" | smbpasswd -s "$u" >/dev/null || die "smbpasswd failed"
+		echo "OK: password set for $u"
+	else
+		smbpasswd -n "$u" >/dev/null || die "smbpasswd failed"
+		echo "OK: $u now has no password"
+	fi ;;
+
+user-admin)
+	need_name "${1:-}"; u=$1; state=${2:-}
+	[ "$u" = alpha ] && die "alpha is always admin"
+	id -u "$u" >/dev/null 2>&1 || die "no such user"
+	case "$state" in
+	on)  usermod -aG smbadmins "$u"
+	     echo "OK: $u is now an admin (access to all shares)" ;;
+	off) gpasswd -d "$u" smbadmins >/dev/null 2>&1
+	     echo "OK: $u is no longer an admin" ;;
+	*)   die "bad admin state" ;;
+	esac ;;
+
+user-del)
+	need_name "${1:-}"; u=$1
+	[[ "$u" =~ ^($PROTECTED_USERS)$ ]] && die "protected user"
+	pdbedit -L | grep -q "^$u:" && smbpasswd -x "$u" >/dev/null
+	share_del_block "$u" || true
+	id -u "$u" >/dev/null 2>&1 && deluser --quiet "$u" >/dev/null 2>&1
+	echo "OK: user $u removed (their files under /srv/nas are kept)" ;;
+
+share-list)
+	awk '
+	function emit(){ if (n != "" && n != "global")
+		printf "%s\t%s\t%s\t%s\t%s\n", n, g, vu, ro, wl }
+	/^\[/ { emit(); n=$0; gsub(/[\[\]]/,"",n); g="no"; vu=""; ro="no"; wl=""; next }
+	/^[ \t]*guest ok[ \t]*=[ \t]*yes/  { g="yes" }
+	/^[ \t]*read only[ \t]*=[ \t]*yes/ { ro="yes" }
+	/^[ \t]*valid users[ \t]*=/ { sub(/^[ \t]*valid users[ \t]*=[ \t]*/,""); vu=$0 }
+	/^[ \t]*write list[ \t]*=/  { sub(/^[ \t]*write list[ \t]*=[ \t]*/,""); wl=$0 }
+	END { emit() }' "$SMB" | \
+	while IFS=$'\t' read -r n g vu ro wl; do
+		if [ "$g" = yes ] && [ "$ro" = yes ] && [ -n "$wl" ]; then
+			d="read: anyone · write: ${wl/@users/all users}"
+		elif [ "$g" = yes ]; then
+			d="anyone on the network (guest, no password)"
+		elif [ "${vu/@users/}" != "$vu" ]; then
+			d="all users"
+		elif [ "${vu/@smbadmins/}" != "$vu" ]; then
+			o=$(printf '%s\n' "$vu" | tr ' ' '\n' | grep -v '^@' | head -1)
+			if [ -n "$o" ]; then d="$o + admins"; else d="admins only"; fi
+		elif [ -n "$vu" ]; then
+			d="$vu"
+		else
+			d="any signed-in user"
+		fi
+		printf '%s\t%s\n' "$n" "$d"
+	done ;;
+
+share-add)
+	need_name "${1:-}"; n=$1; typ=${2:-family}; owner=${3:-}
+	grep -q "^\[$n\]" "$SMB" && die "share [$n] already exists"
+	case "$typ" in
+	private) need_name "$owner"; id -u "$owner" >/dev/null 2>&1 || die "no such owner user";;
+	family|guest) ;;
+	*) die "bad share type";;
+	esac
+	mkdir -p "/srv/nas/$n"
+	case "$typ" in
+	private) chown "$owner:users" "/srv/nas/$n"; chmod 2770 "/srv/nas/$n";;
+	family|guest) chown alpha:users "/srv/nas/$n"; chmod 2775 "/srv/nas/$n";;
+	esac
+	share_add_block "$n" "$typ" "$owner"
+	echo "OK: share $n added" ;;
+
+share-del)
+	need_name "${1:-}"; n=$1
+	[[ "$n" =~ ^($PROTECTED_SHARES)$ ]] && die "protected share"
+	grep -q "^\[$n\]" "$SMB" || die "no such share"
+	share_del_block "$n"
+	echo "OK: share $n removed (directory and files kept)" ;;
+
+led) led_set "${1:-}" "${2:-solid}"; echo OK ;;
+
+dlna-status)
+	if pidof minidlnad >/dev/null 2>&1; then echo running; else echo stopped; fi ;;
+
+dlna-start)
+	service minidlna start >/dev/null 2>&1 || die "minidlna failed to start"
+	update-rc.d minidlna enable >/dev/null 2>&1
+	echo "OK: DLNA running (will also start at boot)" ;;
+
+dlna-stop)
+	service minidlna stop >/dev/null 2>&1
+	pidof minidlnad >/dev/null 2>&1 && { sleep 1; pkill -9 -x minidlnad 2>/dev/null; }
+	update-rc.d minidlna disable >/dev/null 2>&1
+	echo "OK: DLNA stopped (stays off after reboot)" ;;
+
+usb-status)
+	if ! grep -qw sdb /proc/partitions; then echo "absent"; exit 0; fi
+	if grep -q " $USBMNT " /proc/mounts; then
+		echo "mounted $(df -h "$USBMNT" | awk 'NR==2{print $2" ("$5" used)"}')"
+	else
+		echo "present (not mounted)"
+	fi ;;
+
+usb-mount)
+	grep -qw sdb /proc/partitions || die "no USB drive detected"
+	grep -q " $USBMNT " /proc/mounts && { echo "OK: already mounted"; exit 0; }
+	mkdir -p "$USBMNT"
+	# pick the largest partition with a mountable filesystem
+	best=""; bestsz=0
+	for p in /dev/sdb1 /dev/sdb2 /dev/sdb3 /dev/sdb4 /dev/sdb5 /dev/sdb6 /dev/sdb7 /dev/sdb8 /dev/sdb; do
+		[ -b "$p" ] || continue
+		grep -qw "${p#/dev/}" /proc/partitions || continue
+		t=$(blkid -o value -s TYPE "$p" 2>/dev/null) || continue
+		case "$t" in vfat|ext2|ext3|ext4) ;; *) continue ;; esac
+		sz=$(awk -v d="${p#/dev/}" '$4==d{print $3}' /proc/partitions)
+		if [ "${sz:-0}" -gt "$bestsz" ]; then best=$p; bestsz=$sz; besttype=$t; fi
+	done
+	[ -n "$best" ] || die "no mountable partition found (vfat/ext only; NTFS/exFAT need extra packages)"
+	modprobe vfat 2>/dev/null
+	case "$besttype" in
+	vfat) mount -t vfat -o uid=root,gid=users,dmask=0002,fmask=0113 "$best" "$USBMNT" || die "mount failed" ;;
+	*)    mount -t "$besttype" "$best" "$USBMNT" || die "mount failed" ;;
+	esac
+	echo "OK: mounted $best ($besttype) — visible as \\\\CLIO\\usb" ;;
+
+usb-eject)
+	grep -q " $USBMNT " /proc/mounts || { echo "OK: nothing mounted"; exit 0; }
+	sync
+	umount "$USBMNT" || die "drive is busy — close any open files/Explorer windows on \\\\CLIO\\usb, then retry"
+	echo "OK: ejected — safe to unplug" ;;
+
+poweroff)
+	led_set yellow 2>/dev/null || true
+	nohup sh -c 'sleep 2; shutdown -h now' >/dev/null 2>&1 &
+	echo "OK: halting" ;;
+
+reboot)
+	led_set yellow 2>/dev/null || true
+	nohup sh -c 'sleep 2; shutdown -r now' >/dev/null 2>&1 &
+	echo "OK: rebooting" ;;
+
+*) die "unknown verb '$verb'" ;;
+esac

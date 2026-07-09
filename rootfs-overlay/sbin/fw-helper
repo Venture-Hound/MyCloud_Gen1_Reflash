@@ -1,0 +1,16 @@
+#!/bin/sh
+# Legacy firmware userspace helper for the vendor 3.2.26 kernel (pre-3.7 has no
+# direct-from-fs firmware loading; it needs a userspace agent, which was udev —
+# now removed). The kernel invokes this via /proc/sys/kernel/hotplug on a
+# request_firmware() (we need it for the PFE ethernet engine). Env from kernel:
+# ACTION, SUBSYSTEM=firmware, FIRMWARE=<name>, DEVPATH=<sysfs node>.
+[ "$SUBSYSTEM" = firmware ] || exit 0
+[ "$ACTION" = add ] || exit 0
+FW="/lib/firmware/$FIRMWARE"
+LOADING="/sys$DEVPATH/loading"
+DATA="/sys$DEVPATH/data"
+if [ ! -f "$FW" ]; then echo -1 > "$LOADING" 2>/dev/null; exit 1; fi
+echo 1 > "$LOADING" 2>/dev/null
+cat "$FW" > "$DATA" 2>/dev/null
+echo 0 > "$LOADING" 2>/dev/null
+exit 0

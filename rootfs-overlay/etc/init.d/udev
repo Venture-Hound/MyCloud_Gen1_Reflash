@@ -1,0 +1,12 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          udev
+# Required-Start:    mountkernfs
+# Required-Stop:
+# Default-Start:     S
+# Default-Stop:
+# Short-Description: DISABLED no-op (udev v232 hangs the vendor 3.2.26 kernel)
+### END INIT INFO
+# Intentionally does nothing. /dev is populated by devtmpfs via the inittab
+# 'devfs' sysinit action (runs before rcS). Modern udev hung the boot here.
+exit 0

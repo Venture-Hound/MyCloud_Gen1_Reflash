@@ -1,0 +1,2 @@
+# Refresh the MyCloud system LED from box health every 5 minutes.
+*/5 * * * * root /usr/local/lib/nas-panel/led-status >/dev/null 2>&1

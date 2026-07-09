@@ -1,0 +1,47 @@
+#!/bin/bash
+# led-status — set the MyCloud system LED from box health.
+# Run by cron every 5 min and once at end of boot. No daemon.
+#   blue   = all good
+#   yellow = a key service is down, or a filesystem >= 90% full
+#   red    = SMART FAILED or RAID degraded (act now)
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+LED=/sys/class/leds/system_led
+LEDSTATE=/var/run/nas-led.state
+
+# Vendor LED driver kernel-oopses in led_brightness_store (both dmesg
+# traces), and the blink attribute is write-dead (reads "on" whatever
+# is written). Policy: COLOR-ONLY control. Write color only on state
+# change; write brightness only if it isn't 255 yet (once per boot);
+# NEVER touch blink.
+set_led(){ # color
+	local c=$1
+	[ "$(cat "$LEDSTATE" 2>/dev/null)" = "$c" ] && return 0
+	echo "$c" > "$LED/color" 2>/dev/null
+	if [ "$(cat "$LED/brightness" 2>/dev/null)" != "255" ]; then
+		sleep 0.3
+		echo 255 > "$LED/brightness"
+	fi
+	echo "$c" > "$LEDSTATE"
+}
+
+state=blue
+
+for s in smbd sshd; do
+	pidof "$s" >/dev/null 2>&1 || state=yellow
+done
+
+for m in / /srv/nas; do
+	use=$(df --output=pcent "$m" 2>/dev/null | tail -1 | tr -dc '0-9')
+	[ -n "$use" ] && [ "$use" -ge 90 ] && state=yellow
+done
+
+if grep -o '\[[U_]*\]' /proc/mdstat | grep -q '_'; then
+	state=red
+fi
+
+# -n standby: never wake a sleeping disk just to check it
+if smartctl -H -n standby /dev/sda 2>&1 | grep -qi FAILED; then
+	state=red
+fi
+
+set_led "$state"

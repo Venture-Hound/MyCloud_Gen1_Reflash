@@ -1,0 +1,14 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          nas-led
+# Required-Start:    $remote_fs $syslog
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:
+# Short-Description: Set MyCloud system LED from box health at boot end
+### END INIT INFO
+case "$1" in
+	start|restart|force-reload) /usr/local/lib/nas-panel/led-status || true ;;
+	stop|status) : ;;
+esac
+exit 0

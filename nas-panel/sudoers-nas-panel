@@ -1,0 +1,3 @@
+# NAS web panel: www-data may run ONLY the panel-op wrapper as root.
+# Installed by nas-panel/deploy.sh; validated with visudo -cf first.
+www-data ALL=(root) NOPASSWD: /usr/local/lib/nas-panel/panel-op
